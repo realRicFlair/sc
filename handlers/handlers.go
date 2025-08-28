@@ -25,6 +25,12 @@ func UploadHandler(c *gin.Context) {
 		return
 	}
 
+	logicalPath := c.PostForm("path")
+	if logicalPath == "" {
+		c.String(http.StatusBadRequest, "Missing target filepath")
+		return
+	}
+
 	// Open the uploaded file as an io.Reader (Gin stores large files on disk temp)
 	src, err := fh.Open()
 	if err != nil {
@@ -39,7 +45,7 @@ func UploadHandler(c *gin.Context) {
 		c.String(http.StatusInternalServerError, "cwd error: %v", err)
 		return
 	}
-	dstPath := filepath.Join(baseDir, "filestorage", fh.Filename) // <- fix here
+	dstPath := storage.TranslatePath(mkey, baseDir, logicalPath)
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
 		c.String(http.StatusInternalServerError, "mkdir: %v", err)
 		return
@@ -56,13 +62,13 @@ func UploadHandler(c *gin.Context) {
 		_ = dst.Close()
 	}()
 
-	// Stream-encrypt directly from src → dst (no pipes needed)
+	// Stream-encrypt directly from src -> dst (no pipes needed)
 	if err := storage.Encrypt(mkey, src, dst, 0); err != nil {
 		c.String(http.StatusInternalServerError, "Encrypt failed: %v", err)
 		return
 	}
 
-	// Optional: sanity log
+	// sanity log
 	if fi, err := dst.Stat(); err == nil {
 		log.Printf("wrote %s (%d bytes) to %s", fh.Filename, fi.Size(), dstPath)
 	}
@@ -81,7 +87,8 @@ func DownloadHandler(context *gin.Context) {
 	}
 
 	baseDir, _ := os.Getwd()
-	filePath := filepath.Join(baseDir, "/filestorage/", filepath.Clean(requestedPath))
+	//filePath := filepath.Join(baseDir, "/filestorage/", filepath.Clean(requestedPath))
+	filePath := storage.TranslatePath(mkey, baseDir, filepath.Clean(requestedPath))
 	file, err := os.Open(filePath)
 
 	if err != nil {
@@ -123,6 +130,7 @@ func DownloadHandler(context *gin.Context) {
 }
 
 func DeleteHandler(context *gin.Context) {
+
 }
 
 func ListHandler(context *gin.Context) {

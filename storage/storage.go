@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"golang.org/x/crypto/hkdf"
 	"io"
+	"log"
 	"mime/multipart"
 )
 
@@ -18,11 +19,9 @@ type Store struct {
 }
 
 type fileMetadata struct {
-	filename       string
-	filetype       string
-	sizeBytes      int64
-	chunksizeBytes int64
-	chunkcount     int64
+	filename  string
+	filetype  string
+	sizeBytes int64
 }
 
 type Storage interface {
@@ -35,9 +34,10 @@ type Storage interface {
 }
 
 const (
-	versionByte  = 1
-	headerSize   = 1 + 16 + 8 + 4 // ver + salt + noncePrefix + chunkSize
-	defaultChunk = 1 << 20        // 1 MiB
+	versionByte = 1
+	headerSize  = 1 + 16 + 8 + 4
+	// ver(1) + salt(16) + noncePrefix(8) + chunkSize(4) + name() + filesize()
+	defaultChunk = 1 << 20 // 1 MiB
 )
 
 func readHeader(r io.Reader) (chunkSize int, salt, noncePrefix []byte, err error) {
@@ -61,14 +61,6 @@ func readHeader(r io.Reader) (chunkSize int, salt, noncePrefix []byte, err error
 	return
 }
 
-// Use HKDF to turn file salt and masterkey, into the actual file key.
-func deriveFileKey(masterKey, salt []byte) ([]byte, error) {
-	x := hkdf.New(sha256.New, masterKey, salt, []byte("file-key:v1"))
-	key := make([]byte, 32)
-	_, err := io.ReadFull(x, key)
-	return key, err
-}
-
 // writeHeader writes a header to the given writer containing version, salt, noncePrefix, and chunk size information.
 // It returns an error if writing to the writer fails.
 func writeHeader(w io.Writer, chunkSize int, salt, noncePrefix []byte) error {
@@ -79,6 +71,14 @@ func writeHeader(w io.Writer, chunkSize int, salt, noncePrefix []byte) error {
 	binary.BigEndian.PutUint32(header[25:29], uint32(chunkSize))
 	_, err := w.Write(header)
 	return err
+}
+
+// Use HKDF to turn file salt and masterkey, into the actual file key.
+func deriveFileKey(masterKey, salt []byte) ([]byte, error) {
+	x := hkdf.New(sha256.New, masterKey, salt, []byte("file-key:v1"))
+	key := make([]byte, 32)
+	_, err := io.ReadFull(x, key)
+	return key, err
 }
 
 func getGCMBlock(key []byte) (cipher.AEAD, error) {
@@ -93,7 +93,7 @@ func Encrypt(masterKey []byte, r io.Reader, w io.Writer, chunkSize int) error {
 	if chunkSize <= 0 {
 		chunkSize = defaultChunk
 	}
-	var _, err error
+	var err error
 
 	//Fills salt and noncePrefix with random data
 	salt := make([]byte, 16)
@@ -122,52 +122,48 @@ func Encrypt(masterKey []byte, r io.Reader, w io.Writer, chunkSize int) error {
 		return err
 	}
 
-	buffer := make([]byte, chunkSize)
+	// buffers (to not spam allocations)
+	buf := make([]byte, chunkSize)
+	nonce := make([]byte, 12)
+	aad := make([]byte, 8)
+	sealed_dst := make([]byte, 0, chunkSize+aeadBlock.Overhead())
+
 	index := uint32(0)
 	for {
-		n, readErr := io.ReadFull(r, buffer)
-		if readErr == io.ErrUnexpectedEOF || readErr == io.EOF {
-			// last chunk thats partially filled
-			if n == 0 {
-				break
+		n, err := r.Read(buf)
+		if n > 0 {
+			plain := buf[:n]
+
+			//nonce := make([]byte, 12)
+			copy(nonce[:8], noncePrefix)
+			binary.BigEndian.PutUint32(nonce[8:], index)
+
+			//aad := make([]byte, 8)
+			binary.BigEndian.PutUint32(aad[:4], uint32(headerSize))
+			binary.BigEndian.PutUint32(aad[4:], index)
+
+			sealed_dst = sealed_dst[:0]
+			ct := aeadBlock.Seal(sealed_dst, nonce, plain, aad)
+
+			var lenPrefix [4]byte
+			binary.BigEndian.PutUint32(lenPrefix[:], uint32(len(ct)))
+			if _, err2 := w.Write(lenPrefix[:]); err2 != nil {
+				return err2
+			}
+			if _, err2 := w.Write(ct); err2 != nil {
+				return err2
 			}
 
-			break
-		} else if readErr != nil {
-			return readErr
+			index++
 		}
-		plaintext := buffer[:n]
-
-		// We generate a nonce with a prefix to give every chunk a unique nonce.
-		// Nonces are iv's that dont need to be secret.
-		nonce := make([]byte, 12) // 8B prefix + 4B counter
-		copy(nonce[:8], noncePrefix)
-		binary.BigEndian.PutUint32(nonce[8:], index)
-
-		// AAD = headerSize (to bind params) + chunk index
-		aad := make([]byte, 8)
-		binary.BigEndian.PutUint32(aad[:4], uint32(headerSize))
-		binary.BigEndian.PutUint32(aad[4:], index)
-
-		ciphertext := aeadBlock.Seal(nil, nonce, plaintext, aad)
-
-		// length-prefix the ciphertext so the reader knows how much to read
-		var lenPrefix [4]byte
-		binary.BigEndian.PutUint32(lenPrefix[:], uint32(len(ciphertext)))
-		_, err = w.Write(lenPrefix[:])
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
 			return err
-		}
-		_, err = w.Write(ciphertext)
-		if err != nil {
-			return err
-		}
-
-		index++
-		if readErr == io.ErrUnexpectedEOF || readErr == io.EOF {
-			break
 		}
 	}
+	log.Printf("Encrypted %d chunks", index)
 
 	return nil
 }
@@ -187,6 +183,10 @@ func Decrypt(masterKey []byte, r io.Reader, w io.Writer) error {
 		return err
 	}
 
+	//buffers
+	aad := make([]byte, 8)
+	nonce := make([]byte, 12)
+
 	index := uint32(0)
 	for {
 		var lenPrefix [4]byte
@@ -205,11 +205,11 @@ func Decrypt(masterKey []byte, r io.Reader, w io.Writer) error {
 			return err
 		}
 
-		nonce := make([]byte, 12)
+		//nonce := make([]byte, 12)
 		copy(nonce[:8], noncePrefix)
 		binary.BigEndian.PutUint32(nonce[8:], index)
 
-		aad := make([]byte, 8)
+		//aad := make([]byte, 8)
 		binary.BigEndian.PutUint32(aad[:4], uint32(headerSize))
 		binary.BigEndian.PutUint32(aad[4:], index)
 
@@ -225,4 +225,5 @@ func Decrypt(masterKey []byte, r io.Reader, w io.Writer) error {
 
 		index++
 	}
+
 }

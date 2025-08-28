@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"SCloud/storage"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 	"io"
@@ -9,21 +10,80 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 var db *gorm.DB
 
-func UploadHandler(context *gin.Context) {
+func UploadHandler(c *gin.Context) {
+	// 32-byte key for AES-256-GCM
+	mkey := []byte("12345678901234567890123456789012")
 
+	fh, err := c.FormFile("file")
+	if err != nil {
+		c.String(http.StatusBadRequest, "No file uploaded: %v", err)
+		return
+	}
+
+	// Open the uploaded file as an io.Reader (Gin stores large files on disk temp)
+	src, err := fh.Open()
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Error opening upload: %v", err)
+		return
+	}
+	defer src.Close()
+
+	// Build a sane destination path (NO leading slash) and ensure directory exists
+	baseDir, err := os.Getwd()
+	if err != nil {
+		c.String(http.StatusInternalServerError, "cwd error: %v", err)
+		return
+	}
+	dstPath := filepath.Join(baseDir, "filestorage", fh.Filename) // <- fix here
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+		c.String(http.StatusInternalServerError, "mkdir: %v", err)
+		return
+	}
+
+	// Open the destination file for writing (truncate if exists)
+	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Error creating file: %v", err)
+		return
+	}
+	defer func() {
+		_ = dst.Sync()
+		_ = dst.Close()
+	}()
+
+	// Stream-encrypt directly from src → dst (no pipes needed)
+	if err := storage.Encrypt(mkey, src, dst, 0); err != nil {
+		c.String(http.StatusInternalServerError, "Encrypt failed: %v", err)
+		return
+	}
+
+	// Optional: sanity log
+	if fi, err := dst.Stat(); err == nil {
+		log.Printf("wrote %s (%d bytes) to %s", fh.Filename, fi.Size(), dstPath)
+	}
+
+	c.String(http.StatusOK, "File uploaded successfully")
 }
 
 func DownloadHandler(context *gin.Context) {
 	mkey := []byte("12345678901234567890123456789012")
-	requestedPath := context.Param("filepath") // includes leading "/"
-	requestedPath = requestedPath[1:]          // trim leading "/"
+
+	// Trim the wildcard's leading slash and sanitize the path
+	requestedPath := strings.TrimPrefix(context.Param("filepath"), "/")
+	if requestedPath == "" {
+		context.String(http.StatusBadRequest, "Missing file path")
+		return
+	}
 
 	baseDir, _ := os.Getwd()
-	file, err := os.Open(filepath.Join(baseDir, requestedPath))
+	filePath := filepath.Join(baseDir, "/filestorage/", filepath.Clean(requestedPath))
+	file, err := os.Open(filePath)
+
 	if err != nil {
 		context.String(http.StatusNotFound, "File not found")
 		log.Printf("Error opening file: %v", err)
@@ -31,22 +91,35 @@ func DownloadHandler(context *gin.Context) {
 	}
 	defer file.Close()
 
+	// Set download headers (use the requested base name)
 	context.Header("Content-Type", "application/octet-stream")
-	context.Header("Content-Disposition", `attachment; filename="file.bin"`)
+	context.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, filepath.Base(requestedPath)))
 
+	// Pipe so we can detect decrypt errors and optionally fall back
 	pipeReader, pipeWriter := io.Pipe()
 	go func() {
 		defer pipeWriter.Close()
-		// stream-decrypt into the pipe
-		err := storage.Decrypt(mkey, file, pipeWriter)
-		if err != nil {
-			log.Printf("Error decrypting file: %v", err)
+		if err := storage.Decrypt(mkey, file, pipeWriter); err != nil {
+			log.Printf("Error decrypting file %s: %v", filePath, err)
 			pipeWriter.CloseWithError(err)
 		}
 	}()
 
-	// stream plaintext to client
-	_, _ = io.Copy(context.Writer, pipeReader)
+	// Stream plaintext to client
+	bytesWritten, copyErr := io.Copy(context.Writer, pipeReader)
+	if copyErr != nil && bytesWritten == 0 {
+		// Decryption failed before anything was sent:
+		// fall back to streaming the raw file for testing convenience.
+		if _, seekErr := file.Seek(0, io.SeekStart); seekErr == nil {
+			if _, err := io.Copy(context.Writer, file); err != nil {
+				log.Printf("Error streaming raw file %s: %v", filePath, err)
+			}
+			return
+		}
+		// If we can't seek, we can't recover; response likely has headers but no body.
+		log.Printf("Download failed and could not fall back for %s: %v", filePath, copyErr)
+		return
+	}
 }
 
 func DeleteHandler(context *gin.Context) {

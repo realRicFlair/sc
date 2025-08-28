@@ -3,29 +3,20 @@ package storage
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"golang.org/x/crypto/hkdf"
 	"io"
 	"log"
 	"mime/multipart"
 	"path/filepath"
-	"strings"
 )
 
 type Store struct {
 	baseDir string
 	key     []byte
-}
-
-type fileMetadata struct {
-	filename  string
-	filetype  string
-	sizeBytes int64
 }
 
 type Storage interface {
@@ -42,6 +33,8 @@ const (
 	headerSize  = 1 + 16 + 8 + 4
 	// ver(1) + salt(16) + noncePrefix(8) + chunkSize(4) + name() + filesize()
 	defaultChunk = 1 << 20 // 1 MiB
+
+	manifestFileName = "_manifest.bin"
 )
 
 func readHeader(r io.Reader) (chunkSize int, hdr, salt, noncePrefix []byte, err error) {
@@ -231,36 +224,40 @@ func Decrypt(masterKey []byte, r io.Reader, w io.Writer) error {
 	}
 }
 
-// BlindIndex computes HMAC-SHA256(dirPath + "/" + name).
-func BlindIndex(masterKey []byte, dirPath, fileName string) string {
-	input := dirPath + "/" + fileName
-	mac := hmac.New(sha256.New, masterKey)
-	mac.Write([]byte(input))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// TranslatePath takes a logical filepath like "docs/taxes/report.pdf"
-// and returns the encrypted storage path under baseDir.
-func TranslatePath(masterKey []byte, baseDir, logicalPath string) string {
-	cleaned := filepath.Clean(logicalPath)
-	parts := strings.Split(cleaned, string(filepath.Separator))
-	if parts[0] == "" {
-		parts = parts[1:]
-	}
-
-	currentDir := ""
-	indexes := make([]string, 0, len(parts))
-	for _, name := range parts {
-		idx := BlindIndex(masterKey, currentDir, name)
-		indexes = append(indexes, idx)
-
-		if currentDir == "" {
-			currentDir = "/" + name
-		} else {
-			currentDir = currentDir + "/" + name
+func ListDir(masterKey []byte, baseDir, logicalPath string) ([]ManifestEntry, error) {
+	// special case: root
+	if logicalPath == "" || logicalPath == "." || logicalPath == "/" {
+		root, err := ensureRoot(masterKey, baseDir)
+		if err != nil {
+			return nil, err
 		}
+		m, err := loadManifest(masterKey, root)
+		if err != nil {
+			return nil, err
+		}
+		return m.Entries, nil
 	}
 
-	// join all indexes under baseDir
-	return filepath.Join(append([]string{baseDir, "filestorage"}, indexes...)...)
+	// resolve parent directory
+	parentDir, dirName, err := resolveParentDir(masterKey, baseDir, logicalPath, false)
+	if err != nil {
+		return nil, err
+	}
+
+	m, err := loadManifest(masterKey, parentDir)
+	if err != nil {
+		return nil, err
+	}
+	_, entry := findEntry(m, dirName, "dir")
+	if entry == nil {
+		return nil, fmt.Errorf("%q is not a directory", logicalPath)
+	}
+
+	// load child manifest
+	childDir := filepath.Join(parentDir, entry.Enc)
+	cm, err := loadManifest(masterKey, childDir)
+	if err != nil {
+		return nil, err
+	}
+	return cm.Entries, nil
 }

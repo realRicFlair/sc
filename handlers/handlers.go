@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 var db *gorm.DB
@@ -45,7 +46,7 @@ func UploadHandler(c *gin.Context) {
 		c.String(http.StatusInternalServerError, "cwd error: %v", err)
 		return
 	}
-	dstPath := storage.TranslatePath(mkey, baseDir, logicalPath)
+	dstPath, err := storage.ResolveForCreate(mkey, baseDir, filepath.Clean(logicalPath))
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
 		c.String(http.StatusInternalServerError, "mkdir: %v", err)
 		return
@@ -73,6 +74,9 @@ func UploadHandler(c *gin.Context) {
 		log.Printf("wrote %s (%d bytes) to %s", fh.Filename, fi.Size(), dstPath)
 	}
 
+	plainSize := fh.Size
+	_ = storage.UpdateFileMeta(mkey, baseDir, filepath.Clean(logicalPath), plainSize, time.Now())
+
 	c.String(http.StatusOK, "File uploaded successfully")
 }
 
@@ -88,7 +92,7 @@ func DownloadHandler(context *gin.Context) {
 
 	baseDir, _ := os.Getwd()
 	//filePath := filepath.Join(baseDir, "/filestorage/", filepath.Clean(requestedPath))
-	filePath := storage.TranslatePath(mkey, baseDir, filepath.Clean(requestedPath))
+	filePath, err := storage.ResolveForRead(mkey, baseDir, filepath.Clean(requestedPath))
 	file, err := os.Open(filePath)
 
 	if err != nil {
@@ -134,5 +138,20 @@ func DeleteHandler(context *gin.Context) {
 }
 
 func ListHandler(context *gin.Context) {
+	mkey := []byte("12345678901234567890123456789012")
 
+	requestedPath := strings.TrimPrefix(context.Param("filepath"), "/")
+	baseDir, _ := os.Getwd()
+
+	entries, err := storage.ListDir(mkey, baseDir, filepath.Clean(requestedPath))
+	if err != nil {
+		context.String(http.StatusNotFound, "Error listing directory: %v", err)
+		return
+	}
+
+	// Return plaintext metadata as JSON
+	context.JSON(http.StatusOK, gin.H{
+		"path":    requestedPath,
+		"entries": entries,
+	})
 }

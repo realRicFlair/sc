@@ -15,7 +15,7 @@ import (
 
 type ManifestEntry struct {
 	Name    string `json:"name"`           // plaintext visible only after decrypting manifest
-	Enc     string `json:"enc"`            // slug used on disk (dir name or file name, hex)
+	Enc     string `json:"enc"`            // slug (random filename) used on disk (dir name or file name, hex)
 	Type    string `json:"type"`           // "file" | "dir"
 	Size    int64  `json:"size,omitempty"` // plaintext size (files)
 	Created int64  `json:"created,omitempty"`

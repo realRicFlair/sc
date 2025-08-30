@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteTargetsManager">
+    <targets>
+      <target name="adi@10.0.0.6:22" type="ssh/sftp" uuid="d7a10dd7-2be9-4530-8f92-dcdc50474bf8">
+        <config>
+          <option name="projectRootOnTarget" value="/home/adi/SCloud" />
+          <option name="serverName" value="adi@10.0.0.6:22 agent" />
+        </config>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config>
+            <option name="goPath" value="/home/adi/go" />
+            <option name="goRoot" value="/usr/local/go/bin/go" />
+            <option name="goVersion" value="go1.25.0 linux/amd64" />
+          </config>
+        </ContributedStateBase>
+      </target>
+    </targets>
+  </component>
+</project>

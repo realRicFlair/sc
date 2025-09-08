@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -83,8 +82,7 @@ func UploadHandler(c *gin.Context) {
 func DownloadHandler(context *gin.Context) {
 	mkey := []byte("12345678901234567890123456789012")
 
-	// Trim the wildcard's leading slash and sanitize the path
-	requestedPath := strings.TrimPrefix(context.Param("filepath"), "/")
+	requestedPath := context.Query("filepath")
 	if requestedPath == "" {
 		context.String(http.StatusBadRequest, "Missing file path")
 		return
@@ -140,7 +138,10 @@ func DeleteHandler(context *gin.Context) {
 func ListHandler(context *gin.Context) {
 	mkey := []byte("12345678901234567890123456789012")
 
-	requestedPath := strings.TrimPrefix(context.Param("filepath"), "/")
+	requestedPath := context.Query("filepath")
+	if requestedPath == "" {
+		requestedPath = "." // default to root
+	}
 	baseDir, _ := os.Getwd()
 
 	entries, err := storage.ListDir(mkey, baseDir, filepath.Clean(requestedPath))

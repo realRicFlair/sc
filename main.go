@@ -21,8 +21,6 @@ func main() {
 		log.Printf("Error loading config: %v", err)
 	}
 	router.Use(gin.Logger(), gin.Recovery())
-	router.RedirectTrailingSlash = false
-	router.RedirectFixedPath = false
 
 	router.GET("/health", func(context *gin.Context) {
 		context.String(http.StatusOK, "OK")
@@ -45,6 +43,7 @@ func main() {
 		filesGroup := apiGroup.Group("/files")
 		{
 			filesGroup.POST("/upload", handlers.UploadHandler)
+			filesGroup.PUT("/uploadchunked", handlers.ChunkedUploadHandler)
 			filesGroup.GET("/download", handlers.DownloadHandler)
 			filesGroup.DELETE("/delete", handlers.DeleteHandler)
 			filesGroup.GET("/ls", handlers.ListHandler)
@@ -54,6 +53,7 @@ func main() {
 		{
 			authGroup.POST("/register", auth.RegisterHandler)
 		}
+
 	}
 
 	apiGroup.OPTIONS("/*path", func(context *gin.Context) {

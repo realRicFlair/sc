@@ -14,7 +14,13 @@ import (
 //TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
 // the <icon src="AllIcons.Actions.Execute"/> icon in the gutter and select the <b>Run</b> menu item from here.</p>
 
+func checkError(err error) {
+	log.Printf("Error: %v", err)
+}
+
 func main() {
+	//db.ConnectDB()
+
 	router := gin.Default()
 	_, err := config.LoadConfig()
 	if err != nil {
@@ -27,9 +33,9 @@ func main() {
 	})
 
 	router.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"https://rorocorp.org", "http://localhost:5173"},
-		AllowMethods:     []string{http.MethodGet, http.MethodPatch, http.MethodPost, http.MethodHead, http.MethodDelete, http.MethodOptions},
-		AllowHeaders:     []string{"Origin", "Content-Type", "X-XSRF-TOKEN", "Accept", "Origin", "X-Requested-With", "Authorization"},
+		AllowOrigins:     []string{"https://sc.rorocorp.org", "https://apisc.rorocorp.org"},
+		AllowMethods:     []string{http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost, http.MethodHead, http.MethodDelete, http.MethodOptions},
+		AllowHeaders:     []string{"Origin", "Content-Type", "X-XSRF-TOKEN", "X-CSRF-TOKEN", "Accept", "Origin", "X-Requested-With", "Authorization"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
 		AllowOriginFunc: func(origin string) bool {
@@ -41,6 +47,7 @@ func main() {
 	apiGroup := router.Group("/api")
 	{
 		filesGroup := apiGroup.Group("/files")
+		filesGroup.Use(auth.Authorize())
 		{
 			filesGroup.POST("/upload", handlers.UploadHandler)
 			filesGroup.PUT("/uploadchunked", handlers.ChunkedUploadHandler)
@@ -52,6 +59,16 @@ func main() {
 		authGroup := apiGroup.Group("/auth")
 		{
 			authGroup.POST("/register", auth.RegisterHandler)
+			authGroup.POST("/login", auth.LoginHandler)
+			//Signed download handler
+			authGroup.GET("/genDLink", auth.GenerateDownloadLink)
+			authGroup.GET("/checksession", auth.SessionCheckHandler)
+		}
+
+		downloadGroup := apiGroup.Group("/dlink")
+		{
+			downloadGroup.GET("/generateLink", auth.GenerateDownloadLink)
+			downloadGroup.GET("/download", handlers.SignedDownloadHandler)
 		}
 
 	}
@@ -60,22 +77,23 @@ func main() {
 		context.Status(204)
 	})
 
-	router.Static("/assets", "./dist/assets")
-
 	/*
-		router.NoRoute(func(context *gin.Context) {
+		router.Static("/assets", "./dist/assets")
+
+
+			router.NoRoute(func(context *gin.Context) {
+				context.File("./dist/index.html")
+			})
+
+
+		router.GET("/", func(context *gin.Context) {
 			context.File("./dist/index.html")
 		})
 	*/
 
-	router.GET("/", func(context *gin.Context) {
-		context.File("./dist/index.html")
-	})
-
-	router.MaxMultipartMemory = 4 << 30
-
-	err = router.RunTLS(":8443", "./opem.txt", "./okey.txt")
-
+	//router.MaxMultipartMemory = 4 << 30
+	//err = router.RunTLS("10.8.0.2:8443", os.Getenv("SSLPUBLIC"), os.Getenv("SSLPRIVATE"))
+	err = router.Run("0.0.0.0:8443")
 	if err != nil {
 		log.Printf("server error: %v", err)
 		panic(err)

@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"SCloud/auth"
 	"SCloud/storage"
+	"crypto/hmac"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -18,7 +20,7 @@ var db *gorm.DB
 
 func UploadHandler(c *gin.Context) {
 	// 32-byte key for AES-256-GCM
-	mkey := []byte("12345678901234567890123456789012")
+	mkey := []byte(os.Getenv("FILEMASTERKEY"))
 
 	fh, err := c.FormFile("file")
 	if err != nil {
@@ -80,13 +82,38 @@ func UploadHandler(c *gin.Context) {
 	c.String(http.StatusOK, "File uploaded successfully")
 }
 
+func SignedDownloadHandler(context *gin.Context) {
+	fp := context.Query("fp")
+	userID := context.Query("u")
+	expStr := context.Query("exp")
+	sig := context.Query("sig")
+
+	expUnix, _ := strconv.ParseInt(expStr, 10, 64)
+	if time.Now().Unix() > expUnix {
+		context.String(http.StatusUnauthorized, "Link expired")
+		return
+	}
+
+	expectedSig := auth.SignDownload(fp, userID, time.Unix(expUnix, 0))
+	if !hmac.Equal([]byte(expectedSig), []byte(sig)) {
+		println("Expected Sig: ", expectedSig, "Sig: ", sig)
+		context.String(http.StatusUnauthorized, "Invalid signature")
+		return
+	}
+	//Use DownloadHandler to do rest
+	DownloadHandler(context)
+}
+
 func DownloadHandler(context *gin.Context) {
-	mkey := []byte("12345678901234567890123456789012")
+	mkey := []byte(os.Getenv("FILEMASTERKEY"))
 
 	requestedPath := context.Query("filepath")
 	if requestedPath == "" {
-		context.String(http.StatusBadRequest, "Missing file path")
-		return
+		requestedPath = context.Query("fp")
+		if requestedPath == "" {
+			context.String(http.StatusBadRequest, "Missing file path")
+			return
+		}
 	}
 
 	baseDir, _ := os.Getwd()
@@ -137,7 +164,7 @@ func DeleteHandler(context *gin.Context) {
 }
 
 func ListHandler(context *gin.Context) {
-	mkey := []byte("12345678901234567890123456789012")
+	mkey := []byte(os.Getenv("FILEMASTERKEY"))
 
 	requestedPath := context.Query("filepath")
 	if requestedPath == "" {
@@ -159,7 +186,7 @@ func ListHandler(context *gin.Context) {
 }
 
 func ChunkedUploadHandler(context *gin.Context) {
-	mkey := []byte("12345678901234567890123456789012")
+	mkey := []byte(os.Getenv("FILEMASTERKEY"))
 
 	// --- Chunked, stateless mode (single endpoint) ---
 	// Metadata is passed as query params or headers.
